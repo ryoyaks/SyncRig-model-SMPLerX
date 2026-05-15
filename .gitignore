@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+
+# Virtualenvs
+.venv/
+venv/
+
+# uv build artefacts
+.uv-cache/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Weights (license-gated; never commit)
+*.pt
+*.pth
+*.pth.tar
+*.pkl
+*.npz
+*.ckpt
+*.onnx
+*.bin
+*.safetensors
+models/
+
+# Env files
+.env
+.env.*
+!.env.example
