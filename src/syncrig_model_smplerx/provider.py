@@ -258,8 +258,8 @@ class SmplerXProvider(Provider):
                 "commercial use without separate licenses from S-Lab "
                 "and Meshcapade."
             ),
-            user_label="SMPLer-X",
-            user_tagline="Whole-body mesh + fingers · research only · CUDA recommended",
+            user_label="SMPLer-X · whole-body mesh + fingers",
+            user_tagline="Research only · CUDA recommended",
             config_schema=(
                 ProviderConfigField(
                     name="weights",
