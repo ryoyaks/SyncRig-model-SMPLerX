@@ -54,16 +54,22 @@ class SmplerXConfig:
     upscale: int = 4
 
 
-# Per-variant config. Only the corrected ViT-H is shipped; the smaller
-# variants (s32 / b32 / l32) and the un-corrected h32 used to be options
-# but were removed — the install pipeline downloads exactly one
-# checkpoint and listing variants whose weights aren't on disk just
-# strands users on a picker entry that fails on switch. Adding them
-# back is one PR: copy an entry from the SMPLer-X upstream README's
-# architecture table.
-#
-# ViT-H = 1280/32/16 (embed_dim / depth / num_heads).
+# Per-variant config. Two variants exposed in the picker:
+#   ViT-S — 384/12/12, ~384 MB checkpoint, default auto-download
+#   ViT-H corrected — 1280/32/16, ~6 GB checkpoint, manual download
+# The intermediate b32 / l32 sizes and the un-corrected h32 weren't
+# auto-fetched by the installer so they're omitted; adding back is
+# a small change (one VARIANT_CONFIGS entry + one HFDownloadStep +
+# one dropdown option per variant).
 VARIANT_CONFIGS: dict[str, SmplerXConfig] = {
+    "smpler_x_s32": SmplerXConfig(
+        variant="smpler_x_s32",
+        encoder=EncoderConfig(
+            img_size=(256, 192), patch_size=16,
+            embed_dim=384, depth=12, num_heads=12,
+        ),
+        feat_dim=384,
+    ),
     "smpler_x_h32_correct": SmplerXConfig(
         variant="smpler_x_h32_correct",
         encoder=EncoderConfig(
@@ -78,8 +84,7 @@ VARIANT_CONFIGS: dict[str, SmplerXConfig] = {
 def variant_from_path(path: str) -> str:
     """Pick the matching VARIANT key from a checkpoint filename.
 
-    Example: ``models/smplerx/smpler_x_h32_correct.pth.tar`` →
-    ``smpler_x_h32_correct``.
+    Example: ``models/smplerx/smpler_x_s32.pth.tar`` → ``smpler_x_s32``.
     """
     name = path.replace("\\", "/").rsplit("/", 1)[-1]
     if name.endswith(".pth.tar"):

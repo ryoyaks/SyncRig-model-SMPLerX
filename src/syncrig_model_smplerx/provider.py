@@ -466,16 +466,18 @@ class SmplerXProvider(Provider):
                     name="weights",
                     label="Checkpoint",
                     type="enum",
-                    default="smpler_x_h32_correct",
+                    default="smpler_x_s32",
                     options=(
-                        # Only the corrected ViT-H is offered. The
-                        # smaller variants (s32 / b32 / l32) and the
-                        # un-corrected h32 are intentionally removed —
-                        # the install pipeline only fetches ONE
-                        # checkpoint per install, so listing variants
-                        # that aren't on disk leaves the user with a
-                        # picker entry that fails on switch.
-                        ("smpler_x_h32_correct", "ViT-H corrected (MPE 59.7, ~6 GB)"),
+                        # Two variants: fast (default) + best. The
+                        # in-between sizes (b32 / l32) and the
+                        # un-corrected h32 used to be options but the
+                        # install pipeline didn't auto-fetch them, so
+                        # they're omitted to avoid stranded picker
+                        # entries that fail at switch-time. Adding
+                        # them back means a new HFDownloadStep + a
+                        # VARIANT_CONFIGS entry per variant.
+                        ("smpler_x_s32", "ViT-S (fast, MPE 82.6, ~384 MB)"),
+                        ("smpler_x_h32_correct", "ViT-H corrected (best, MPE 59.7, ~6 GB)"),
                     ),
                 ),
             ),
@@ -506,10 +508,10 @@ class SmplerXProvider(Provider):
         return [
             HFDownloadStep(
                 repo="caizhongang/SMPLer-X",
-                filename="smpler_x_h32_correct.pth.tar",
+                filename="smpler_x_s32.pth.tar",
                 target_dir="models/smplerx",
                 gated=False,
-                label="Download SMPLer-X ViT-H corrected checkpoint (~6 GB)",
+                label="Download SMPLer-X ViT-S checkpoint (~384 MB)",
             ),
             ManualFileStep(
                 target_path="models/smplerx/SMPLX_NEUTRAL.npz",
@@ -544,7 +546,7 @@ class SmplerXProvider(Provider):
         import torch  # noqa: PLC0415
 
         cfg = config or {}
-        variant = cfg.get("weights") or "smpler_x_h32_correct"
+        variant = cfg.get("weights") or "smpler_x_s32"
 
         ckpt_path = _MODELS_DIR / f"{variant}.pth.tar"
         smplx_npz = _MODELS_DIR / "SMPLX_NEUTRAL.npz"
