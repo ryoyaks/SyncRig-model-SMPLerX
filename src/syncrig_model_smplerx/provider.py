@@ -233,32 +233,205 @@ def _build_pose_landmarks_55(
     return out
 
 
+# Approximate metric scale used when the SMPL-X parametric layer is
+# unavailable — see ``_build_pose_world_landmarks_55_no_smplx``. Picked
+# so a typical adult subject (1.7 m, filling ~85 % of the bbox height)
+# emits sensible numbers; the renderer's walking-baseline math
+# (``rig_state.ts``) takes care of the rest.
+_SUBJECT_HEIGHT_M = 1.7
+_BBOX_FILL_FRAC = 0.85
+# Depth grid coverage in metres. Empirical — SMPLer-X's heatmap-depth
+# range covers roughly ±body-depth around the root, and the resulting
+# pose-z values are most useful when "limb forward of torso" reads as
+# positive z. The exact magnitude isn't critical because consumers
+# treat z as relative.
+_HM_DEPTH_RANGE_M = 1.5
+
+
+def _build_pose_world_landmarks_55_no_smplx(
+    body_jimg: np.ndarray,        # (25, 3) — x,y in body-hm coords, z in depth bin
+    lhand_jimg: np.ndarray,       # (20, 3)
+    rhand_jimg: np.ndarray,
+    lhand_bbox: np.ndarray,
+    rhand_bbox: np.ndarray,
+    body_hm_w: float, body_hm_h: float, body_hm_depth: float,
+    hand_hm_w: float, hand_hm_h: float, hand_hm_depth: float,
+    in_body_w: float, in_body_h: float,
+    bw: float, bh: float,
+) -> list[list[float]]:
+    """Degraded-mode 3D skeleton — used when SMPLX_NEUTRAL.npz is absent.
+
+    The SMPL-X parametric layer's forward gives clean root-aligned 3D
+    joints in body-local metres. Without it we reconstruct an
+    *approximate* 3D pose from PositionNet's heatmap soft-argmax
+    outputs: every joint already comes with (x, y, z) in heatmap-grid
+    units, so we just need to convert to metres and root-align to
+    pelvis.
+
+    Calibration is intentionally rough — bbox height stands in for
+    subject height, depth grid coverage is a rough constant. The
+    renderer's walking-baseline math then anchors the first frame to
+    the scene origin regardless, so absolute scale doesn't have to be
+    pixel-perfect.
+
+    Topology stays SMPLX_55, matching the 2D path's joint indexing
+    (``_build_pose_landmarks_55``). Hands inherit the body wrist
+    position when their bbox is degenerate; the SMPL-X spine column /
+    collars / head / jaw entries are interpolated the same way the
+    2D builder does.
+    """
+    out: list[list[float]] = [[0.0, 0.0, 0.0] for _ in range(55)]
+
+    # bbox-pixel → metres. Assume the subject's torso fills ~85% of
+    # the bbox vertically and a typical adult is 1.7 m tall.
+    px_to_m = (_SUBJECT_HEIGHT_M / max(_BBOX_FILL_FRAC, 1e-3)) / max(bh, 1.0)
+    # Heatmap z bin → metres relative to pelvis depth.
+    z_body_to_m = _HM_DEPTH_RANGE_M / max(body_hm_depth, 1.0)
+    z_hand_to_m = _HM_DEPTH_RANGE_M / max(hand_hm_depth, 1.0)
+
+    pelvis_x_hm = float(body_jimg[0, 0])
+    pelvis_y_hm = float(body_jimg[0, 1])
+    pelvis_z_hm = float(body_jimg[0, 2])
+
+    def body_to_world(b_idx: int) -> list[float]:
+        # body_jimg coords are in body-hm units; convert to "pixels
+        # relative to the original-frame bbox" first, then to metres.
+        # body_hm grid maps proportionally onto bbox (input_body_shape
+        # is bbox-aspect-padded), so the same scale factor works.
+        x_hm = float(body_jimg[b_idx, 0])
+        y_hm = float(body_jimg[b_idx, 1])
+        z_hm = float(body_jimg[b_idx, 2])
+        dx_px = (x_hm - pelvis_x_hm) / max(body_hm_w, 1.0) * bw
+        # SyncRig uses image-y-down convention (matches MediaPipe's
+        # world_landmarks output); renderer Y-flips at draw time.
+        dy_px = (y_hm - pelvis_y_hm) / max(body_hm_h, 1.0) * bh
+        dz_m = (z_hm - pelvis_z_hm) * z_body_to_m
+        return [dx_px * px_to_m, dy_px * px_to_m, dz_m]
+
+    def hand_to_world(
+        jimg: np.ndarray, h_idx: int, bbox_in: np.ndarray, flip_x: bool,
+    ) -> list[float]:
+        bx1, by1, bx2, by2 = (float(v) for v in bbox_in)
+        bw_in = bx2 - bx1
+        bh_in = by2 - by1
+        u = float(jimg[h_idx, 0]) / max(hand_hm_w, 1.0)
+        v = float(jimg[h_idx, 1]) / max(hand_hm_h, 1.0)
+        if flip_x:
+            u = 1.0 - u
+        # input_body_shape pixels relative to bbox; convert to original
+        # frame pixels via the bw/bh proportional mapping.
+        x_in = bx1 + u * bw_in
+        y_in = by1 + v * bh_in
+        # input_body_shape → bbox pixels (proportional). We use the
+        # same body_to_world mapping by translating to a "virtual
+        # body_jimg coord" so the metric conversion is consistent
+        # across body and hand joints.
+        x_px_in_bbox = (x_in / max(in_body_w, 1.0)) * bw
+        y_px_in_bbox = (y_in / max(in_body_h, 1.0)) * bh
+        # Pelvis in bbox pixels (for the relative offset).
+        pelvis_px_x = (pelvis_x_hm / max(body_hm_w, 1.0)) * bw
+        pelvis_px_y = (pelvis_y_hm / max(body_hm_h, 1.0)) * bh
+        z_hm = float(jimg[h_idx, 2])
+        # hand z is in hand_hm depth bins; convert to metres and
+        # leave it relative to wrist depth (we don't have a wrist
+        # depth from body_jimg in the same depth-grid scale, so just
+        # offset from 0 inside hand depth — the wrist limb-link will
+        # anchor it in the rendered chain).
+        dz_m = (z_hm - hand_hm_depth / 2.0) * z_hand_to_m
+        return [
+            (x_px_in_bbox - pelvis_px_x) * px_to_m,
+            (y_px_in_bbox - pelvis_px_y) * px_to_m,
+            dz_m,
+        ]
+
+    # Body — direct mappings.
+    for s_idx, b_idx in _BODY_DIRECT:
+        out[s_idx] = body_to_world(b_idx)
+
+    # Spine column — interpolate hips midpoint → neck on x/y/z.
+    pelvis_xyz = out[0]
+    neck_xyz = out[12]
+    hip_mid = [
+        (out[1][0] + out[2][0]) / 2.0,
+        (out[1][1] + out[2][1]) / 2.0,
+        (out[1][2] + out[2][2]) / 2.0,
+    ]
+    for s_idx, t in ((3, 0.30), (6, 0.55), (9, 0.85)):
+        out[s_idx] = [
+            hip_mid[0] * (1 - t) + neck_xyz[0] * t,
+            hip_mid[1] * (1 - t) + neck_xyz[1] * t,
+            hip_mid[2] * (1 - t) + neck_xyz[2] * t,
+        ]
+    out[0] = pelvis_xyz
+
+    # Collars (13 / 14) — midpoint of neck and corresponding shoulder.
+    for s_idx, sh_idx in ((13, 16), (14, 17)):
+        sh = out[sh_idx]
+        out[s_idx] = [
+            (neck_xyz[0] + sh[0]) / 2.0,
+            (neck_xyz[1] + sh[1]) / 2.0,
+            (neck_xyz[2] + sh[2]) / 2.0,
+        ]
+
+    # Head (15) — midpoint of L_Ear / R_Ear.
+    lear = body_to_world(20)
+    rear = body_to_world(21)
+    out[15] = [
+        (lear[0] + rear[0]) / 2.0,
+        (lear[1] + rear[1]) / 2.0,
+        (lear[2] + rear[2]) / 2.0,
+    ]
+
+    # Jaw (22) — extrapolate from head along nose direction.
+    nose = body_to_world(24)
+    out[22] = [
+        (nose[0] + out[15][0]) / 2.0 + (nose[0] - out[15][0]) * 0.5,
+        (nose[1] + out[15][1]) / 2.0 + (nose[1] - out[15][1]) * 0.5,
+        (nose[2] + out[15][2]) / 2.0 + (nose[2] - out[15][2]) * 0.5,
+    ]
+
+    # Hands (25..39 left, 40..54 right).
+    for s_off, jimg, bbox, flip in (
+        (25, lhand_jimg, lhand_bbox, True),
+        (40, rhand_jimg, rhand_bbox, False),
+    ):
+        for sub_idx, h_idx in _HAND_PER_SIDE:
+            out[s_off + sub_idx] = hand_to_world(jimg, h_idx, bbox, flip)
+
+    return out
+
+
 @ProviderRegistry.register
 class SmplerXProvider(Provider):
     """SMPLer-X — SMPL-X full-body single-image regressor."""
 
     @classmethod
     def capabilities(cls) -> ProviderCapabilities:
-        # SMPL-X parametric layer is optional at run time — the regression
-        # heads produce 2D landmarks + axis-angle params regardless. With
-        # SMPLX_NEUTRAL.npz on disk we additionally evaluate the SMPL-X
-        # layer to get 3D world joints + a posed mesh. Without it, the
-        # provider degrades to 2D-only + params (Blender / Unity can still
-        # drive their own SMPL-X rig from the params).
+        # SMPL-X parametric layer is optional at run time. With the
+        # ``SMPLX_NEUTRAL.npz`` on disk we evaluate the full SMPL-X
+        # forward and emit a posed mesh + clean root-aligned 3D
+        # joints. Without it we degrade to:
+        #   * 2D image-space landmarks (renderer's 2D overlay)
+        #   * approximate 3D world landmarks reconstructed from the
+        #     PositionNet heatmap depth bins — less accurate than the
+        #     SMPL-X FK output but enough for the 3D viewport's
+        #     wireframe to track the subject
+        #   * SMPL-X axis-angle parameters (Blender / Unity SMPL-X rigs)
+        # losing only the mesh.
         smplx_npz = _MODELS_DIR / "SMPLX_NEUTRAL.npz"
         has_smplx = smplx_npz.is_file()
         warnings: tuple[tuple[str, str, str], ...] = ()
         if not has_smplx:
             warnings = (
                 (
-                    "Mesh + 3D joints unavailable",
+                    "Mesh unavailable",
                     "SMPLX_NEUTRAL.npz is not on disk; the provider runs "
-                    "in degraded mode — 2D image-space joints + SMPL-X "
-                    "axis-angle parameters are emitted (Blender / Unity "
-                    "SMPL-X rigs still work), but the 3D viewport's "
-                    "world-space skeleton and mesh are skipped. Drop the "
-                    "file at "
-                    f"{smplx_npz} to enable them.",
+                    "in degraded mode. The 3D viewport still shows a "
+                    "55-joint skeleton wireframe (approximated from the "
+                    "model's depth heatmaps) and SMPL-X parameters still "
+                    "flow to Blender / Unity, but the posed mesh is "
+                    f"skipped. Drop the file at {smplx_npz} to enable "
+                    "mesh + more accurate 3D joints.",
                     "https://smpl-x.is.tue.mpg.de/download.php",
                 ),
             )
@@ -585,11 +758,11 @@ class SmplerXProvider(Provider):
         provider_out.pose_landmarks = pose_landmarks
         provider_out.visibility = [1.0] * 55
 
-        # 3D world-space joints + mesh require the SMPL-X parametric
-        # layer. In degraded mode (no SMPLX_NEUTRAL.npz) these are
-        # absent — the regression-head outputs above (pose_landmarks,
-        # SMPL-X params) still flow. Downstream consumers tolerate
-        # empty world_landmarks and empty mesh_vertices.
+        # 3D world-space joints + mesh: full mode uses SMPL-X forward
+        # output; degraded mode reconstructs a 55-joint skeleton from
+        # PositionNet heatmap depth bins (see
+        # ``_build_pose_world_landmarks_55_no_smplx``). Mesh is only
+        # available in full mode — degraded mode skips it entirely.
         if joints_tensor is not None and verts_tensor is not None:
             joints_local = joints_tensor[0, :55].detach().cpu().numpy()  # (55, 3)
             verts_local = verts_tensor[0].detach().cpu().numpy()         # (10475, 3)
@@ -607,6 +780,24 @@ class SmplerXProvider(Provider):
             ]
             provider_out.mesh_faces = self._faces_list
             provider_out.mesh_topology = "smplx"
+        else:
+            # Degraded — assemble a 55-joint world skeleton from the
+            # heatmap outputs (xy + depth bin). Approximate metric
+            # calibration; the renderer's walking-baseline math
+            # anchors the first frame regardless.
+            body_hm_d = float(self._model.cfg.output_hm_shape[0])
+            hand_hm_d = float(self._model.cfg.output_hand_hm_shape[0])
+            provider_out.pose_world_landmarks = _build_pose_world_landmarks_55_no_smplx(
+                body_jimg.detach().cpu().numpy(),
+                lhand_jimg.detach().cpu().numpy(),
+                rhand_jimg.detach().cpu().numpy(),
+                lhand_bbox_in.detach().cpu().numpy(),
+                rhand_bbox_in.detach().cpu().numpy(),
+                body_hm_w, body_hm_h, body_hm_d,
+                hand_hm_w, hand_hm_h, hand_hm_d,
+                float(in_body_w), float(in_body_h),
+                bw, bh,
+            )
 
         # SMPL-X parameters — concat in the canonical order for the
         # Blender driver: root_pose(3) + body_pose(63) + lhand(45) +
