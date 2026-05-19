@@ -466,13 +466,16 @@ class SmplerXProvider(Provider):
                     name="weights",
                     label="Checkpoint",
                     type="enum",
-                    default="smpler_x_s32",
+                    default="smpler_x_h32_correct",
                     options=(
-                        ("smpler_x_s32", "ViT-S (fastest, MPE 82.6)"),
-                        ("smpler_x_b32", "ViT-B (MPE 74.3)"),
-                        ("smpler_x_l32", "ViT-L (MPE 66.2)"),
-                        ("smpler_x_h32", "ViT-H (slowest, MPE 63.0)"),
-                        ("smpler_x_h32_correct", "ViT-H corrected (best, MPE 59.7)"),
+                        # Only the corrected ViT-H is offered. The
+                        # smaller variants (s32 / b32 / l32) and the
+                        # un-corrected h32 are intentionally removed —
+                        # the install pipeline only fetches ONE
+                        # checkpoint per install, so listing variants
+                        # that aren't on disk leaves the user with a
+                        # picker entry that fails on switch.
+                        ("smpler_x_h32_correct", "ViT-H corrected (MPE 59.7, ~6 GB)"),
                     ),
                 ),
             ),
@@ -503,10 +506,10 @@ class SmplerXProvider(Provider):
         return [
             HFDownloadStep(
                 repo="caizhongang/SMPLer-X",
-                filename="smpler_x_s32.pth.tar",
+                filename="smpler_x_h32_correct.pth.tar",
                 target_dir="models/smplerx",
                 gated=False,
-                label="Download SMPLer-X ViT-S checkpoint (~384 MB)",
+                label="Download SMPLer-X ViT-H corrected checkpoint (~6 GB)",
             ),
             ManualFileStep(
                 target_path="models/smplerx/SMPLX_NEUTRAL.npz",
@@ -541,7 +544,7 @@ class SmplerXProvider(Provider):
         import torch  # noqa: PLC0415
 
         cfg = config or {}
-        variant = cfg.get("weights") or "smpler_x_s32"
+        variant = cfg.get("weights") or "smpler_x_h32_correct"
 
         ckpt_path = _MODELS_DIR / f"{variant}.pth.tar"
         smplx_npz = _MODELS_DIR / "SMPLX_NEUTRAL.npz"

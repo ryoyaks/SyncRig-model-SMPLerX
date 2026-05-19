@@ -54,42 +54,16 @@ class SmplerXConfig:
     upscale: int = 4
 
 
-# Per-variant config. State-dict layer names are identical across sizes;
-# only the encoder dims differ. ViT-S = 384/12/12, B = 768/12/12, L =
-# 1024/24/16, H = 1280/32/16.
+# Per-variant config. Only the corrected ViT-H is shipped; the smaller
+# variants (s32 / b32 / l32) and the un-corrected h32 used to be options
+# but were removed — the install pipeline downloads exactly one
+# checkpoint and listing variants whose weights aren't on disk just
+# strands users on a picker entry that fails on switch. Adding them
+# back is one PR: copy an entry from the SMPLer-X upstream README's
+# architecture table.
+#
+# ViT-H = 1280/32/16 (embed_dim / depth / num_heads).
 VARIANT_CONFIGS: dict[str, SmplerXConfig] = {
-    "smpler_x_s32": SmplerXConfig(
-        variant="smpler_x_s32",
-        encoder=EncoderConfig(
-            img_size=(256, 192), patch_size=16,
-            embed_dim=384, depth=12, num_heads=12,
-        ),
-        feat_dim=384,
-    ),
-    "smpler_x_b32": SmplerXConfig(
-        variant="smpler_x_b32",
-        encoder=EncoderConfig(
-            img_size=(256, 192), patch_size=16,
-            embed_dim=768, depth=12, num_heads=12,
-        ),
-        feat_dim=768,
-    ),
-    "smpler_x_l32": SmplerXConfig(
-        variant="smpler_x_l32",
-        encoder=EncoderConfig(
-            img_size=(256, 192), patch_size=16,
-            embed_dim=1024, depth=24, num_heads=16,
-        ),
-        feat_dim=1024,
-    ),
-    "smpler_x_h32": SmplerXConfig(
-        variant="smpler_x_h32",
-        encoder=EncoderConfig(
-            img_size=(256, 192), patch_size=16,
-            embed_dim=1280, depth=32, num_heads=16,
-        ),
-        feat_dim=1280,
-    ),
     "smpler_x_h32_correct": SmplerXConfig(
         variant="smpler_x_h32_correct",
         encoder=EncoderConfig(
@@ -104,7 +78,8 @@ VARIANT_CONFIGS: dict[str, SmplerXConfig] = {
 def variant_from_path(path: str) -> str:
     """Pick the matching VARIANT key from a checkpoint filename.
 
-    Example: ``models/smplerx/smpler_x_s32.pth.tar`` → ``smpler_x_s32``.
+    Example: ``models/smplerx/smpler_x_h32_correct.pth.tar`` →
+    ``smpler_x_h32_correct``.
     """
     name = path.replace("\\", "/").rsplit("/", 1)[-1]
     if name.endswith(".pth.tar"):
