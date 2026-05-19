@@ -1,6 +1,6 @@
 [project]
 name = "syncrig-model-smplerx"
-version = "0.1.0"
+version = "0.2.0"
 description = "SMPLer-X provider plug-in for SyncRig (research-only; S-Lab 1.0 + SMPL-X MPI)"
 license = "LicenseRef-S-Lab-1.0"
 license-files = ["LICENSE"]
@@ -10,8 +10,12 @@ requires-python = ">=3.10,<3.13"
 # introspection (e.g. the ExtensionsPage card before installing) can
 # import the package without pulling torch.
 dependencies = [
-    "syncrig-core>=0.1.0",
-    "syncrig-engine>=0.1.0",
+    # ``syncrig-core>=0.3`` is the version that ships the plugin SDK +
+    # ``syncrig_core.providers.helpers`` (require_modules / silence_stdout
+    # / BackgroundWarmup). Without it, the import-time
+    # ``require_modules`` call we use can't resolve.
+    "syncrig-core>=0.3",
+    "syncrig-engine>=0.3",
 ]
 
 [project.optional-dependencies]

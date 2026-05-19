@@ -23,17 +23,18 @@ Outputs:
 
 from __future__ import annotations
 
-import importlib.util as _ilu
+from syncrig_core.providers.helpers import require_modules
 
-for _required in ("torch", "torchvision", "smplx"):
-    if _ilu.find_spec(_required) is None:
-        raise ImportError(
-            f"syncrig-model-smplerx requires its install extras "
-            f"(missing module: {_required}). Run "
-            "`uv pip install 'syncrig-model-smplerx[runtime]'` or "
-            "`pip install syncrig-model-smplerx[runtime]` to pull "
-            "torch + torchvision + smplx."
-        )
+# Raise at module-top when runtime extras aren't on disk. The engine's
+# entry-point autoloader catches this and surfaces the plugin under
+# ``ep:smplerx`` (unavailable) → the Extensions UI's
+# ``FailedEntryPointCard`` directs the user to re-install via the git
+# URL field, which auto-installs ``[runtime]`` extras (v0.3 SDK).
+require_modules(
+    ("torch", "torchvision", "smplx"),
+    pkg="syncrig-model-smplerx",
+    install_command="pip install 'syncrig-model-smplerx[runtime]'",
+)
 
 import logging
 from typing import TYPE_CHECKING
@@ -461,6 +462,14 @@ class SmplerXProvider(Provider):
             runtime_warnings=warnings,
             user_label="SMPLer-X · whole-body mesh + fingers",
             user_tagline="Research only · CUDA recommended",
+            # v0.3 plugin SDK metadata — surfaces on the Extensions
+            # card header + inside the git-install confirm modal.
+            version="0.2.0",
+            repository_url="https://github.com/ryoyaks/SyncRig-model-SMPLerX",
+            homepage="https://caizhongang.github.io/projects/SMPLer-X/",
+            author="@ryoyaks",
+            license="S-Lab-1.0",
+            tags=frozenset({"body", "hands", "face", "mesh", "smplx", "research-only"}),
             config_schema=(
                 ProviderConfigField(
                     name="weights",
