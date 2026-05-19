@@ -269,20 +269,38 @@ class SmplerXModel(nn.Module):
         expr, jaw_pose_6d = self.face_regressor(expr_token, jaw_pose_token)
         jaw_pose = rot6d_to_axis_angle(jaw_pose_6d)
 
-        # 6. SMPL-X forward → mesh + joints (root-aligned)
-        verts_local, joints_local = self._evaluate_smplx(
-            root_pose, body_pose, lhand_pose, rhand_pose, jaw_pose, shape, expr,
-        )
-        # Root-align (move pelvis to body-local origin). joints_local
-        # already is in canonical pose via SMPL-X; subtract the pelvis
-        # so downstream code matches MediaPipe's hip-anchored convention.
-        root = joints_local[:, constants.ROOT_JOINT_IDX:constants.ROOT_JOINT_IDX + 1, :]
-        joints_local = joints_local - root
-        verts_local = verts_local - root
+        # 6. SMPL-X forward → mesh + joints (root-aligned).
+        #
+        # The SMPL-X parametric layer is loaded from SMPLX_NEUTRAL.npz,
+        # which is research-only and license-gated. When the user
+        # hasn't supplied it yet, ``smplx_layer`` is None and we skip
+        # the mesh-evaluation step — provider still gets:
+        #   * 2D image-space landmarks (from body_joint_img / hand_joint_img)
+        #   * SMPL-X regression parameters (root_pose / body_pose / hands /
+        #     jaw / shape / expr) which downstream Blender / Unity rigs
+        #     can drive on their own SMPL-X model file
+        # but loses:
+        #   * vertices (no mesh to draw)
+        #   * 3D root-aligned joints (those come from SMPL-X forward, not
+        #     the regression heads — the regression heads emit axis-angle
+        #     params, not joint positions)
+        if self.smplx_layer is not None:
+            verts_local, joints_local = self._evaluate_smplx(
+                root_pose, body_pose, lhand_pose, rhand_pose, jaw_pose, shape, expr,
+            )
+            # Root-align (move pelvis to body-local origin). joints_local
+            # already is in canonical pose via SMPL-X; subtract the pelvis
+            # so downstream code matches MediaPipe's hip-anchored convention.
+            root = joints_local[:, constants.ROOT_JOINT_IDX:constants.ROOT_JOINT_IDX + 1, :]
+            joints_local = joints_local - root
+            verts_local = verts_local - root
+        else:
+            verts_local = None
+            joints_local = None
 
         return {
-            "vertices": verts_local,                # (B, 10475, 3)
-            "joints": joints_local,                 # (B, 137, 3)
+            "vertices": verts_local,                # (B, 10475, 3) or None
+            "joints": joints_local,                 # (B, 137, 3) or None
             "smplx_root_pose": root_pose,           # (B, 3)
             "smplx_body_pose": body_pose,           # (B, 63)
             "smplx_lhand_pose": lhand_pose,         # (B, 45)

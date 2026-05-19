@@ -239,13 +239,39 @@ class SmplerXProvider(Provider):
 
     @classmethod
     def capabilities(cls) -> ProviderCapabilities:
+        # SMPL-X parametric layer is optional at run time — the regression
+        # heads produce 2D landmarks + axis-angle params regardless. With
+        # SMPLX_NEUTRAL.npz on disk we additionally evaluate the SMPL-X
+        # layer to get 3D world joints + a posed mesh. Without it, the
+        # provider degrades to 2D-only + params (Blender / Unity can still
+        # drive their own SMPL-X rig from the params).
+        smplx_npz = _MODELS_DIR / "SMPLX_NEUTRAL.npz"
+        has_smplx = smplx_npz.is_file()
+        warnings: tuple[tuple[str, str, str], ...] = ()
+        if not has_smplx:
+            warnings = (
+                (
+                    "Mesh + 3D joints unavailable",
+                    "SMPLX_NEUTRAL.npz is not on disk; the provider runs "
+                    "in degraded mode — 2D image-space joints + SMPL-X "
+                    "axis-angle parameters are emitted (Blender / Unity "
+                    "SMPL-X rigs still work), but the 3D viewport's "
+                    "world-space skeleton and mesh are skipped. Drop the "
+                    "file at "
+                    f"{smplx_npz} to enable them.",
+                    "https://smpl-x.is.tue.mpg.de/download.php",
+                ),
+            )
+        # ``outputs`` also degrades — the engine uses this to grey-out
+        # TrackingMask toggles for modalities the provider can't emit.
+        outputs = {OutputKind.SKELETON, OutputKind.SMPL}
+        if has_smplx:
+            outputs.add(OutputKind.MESH)
         return ProviderCapabilities(
             name="smplerx",
             description="SMPLer-X — whole-body SMPL-X (body + 30 finger joints + face) with mesh. Heavier but expressive.",
             skeleton_topology=SkeletonTopology.SMPLX_55,
-            outputs=frozenset({
-                OutputKind.SKELETON, OutputKind.SMPL, OutputKind.MESH,
-            }),
+            outputs=frozenset(outputs),
             requires_gpu=True,  # CPU works but ~10× slower
             requires_extra="smplerx",
             fps_estimate=30,    # ViT-S; H32 ~15 fps
@@ -253,11 +279,13 @@ class SmplerXProvider(Provider):
             min_vram_gb=4.0,
             commercial="non-commercial",
             commercial_note=(
-                "S-Lab License 1.0 (code + weights) + SMPL-X parametric "
-                "model (MPI, research-only). Both layers prohibit "
-                "commercial use without separate licenses from S-Lab "
-                "and Meshcapade."
+                "S-Lab License 1.0 (code + weights). The optional "
+                "SMPL-X parametric model (MPI, research-only) prohibits "
+                "commercial use of the mesh / 3D joints derived from "
+                "it; the SMPL-X parameters themselves are SMPLer-X "
+                "outputs subject to S-Lab terms only."
             ),
+            runtime_warnings=warnings,
             user_label="SMPLer-X · whole-body mesh + fingers",
             user_tagline="Research only · CUDA recommended",
             config_schema=(
@@ -279,21 +307,21 @@ class SmplerXProvider(Provider):
 
     @classmethod
     def is_ready(cls) -> tuple[bool, str]:
-        """Check that at least one checkpoint + the SMPLX_NEUTRAL.npz
-        are on disk before the user clicks Switch."""
+        """Check that at least one SMPLer-X checkpoint is on disk.
+
+        ``SMPLX_NEUTRAL.npz`` is intentionally NOT required here — the
+        provider degrades to a no-mesh, no-3D-joints mode without it (see
+        capabilities.runtime_warnings). That mode still emits 2D landmarks
+        and SMPL-X axis-angle parameters, which is enough for the Blender
+        / Unity driver paths even though the 3D viewport's world-space
+        skeleton + mesh are unavailable.
+        """
         ckpts = list(_MODELS_DIR.glob("smpler_x_*.pth.tar")) if _MODELS_DIR.exists() else []
         if not ckpts:
             return False, (
                 f"SMPLer-X checkpoint missing under {_MODELS_DIR}. "
                 "Download at least one variant from HuggingFace "
                 "(caizhongang/SMPLer-X)."
-            )
-        smplx_npz = _MODELS_DIR / "SMPLX_NEUTRAL.npz"
-        if not smplx_npz.is_file():
-            return False, (
-                f"SMPL-X parametric model missing at {smplx_npz}. "
-                "Register at smpl-x.is.tue.mpg.de and drop "
-                "SMPLX_NEUTRAL.npz into models/smplerx/."
             )
         return True, ""
 
@@ -331,6 +359,10 @@ class SmplerXProvider(Provider):
         self._detector = None
         self._faces_list: list[list[int]] = []
         self._device: str = "cpu"
+        # True only when SMPLX_NEUTRAL.npz was present at setup and
+        # the SMPL-X parametric layer loaded successfully. Process()
+        # checks this to decide whether to emit mesh + 3D joints.
+        self._has_smplx: bool = False
 
     def setup(self, config: dict | None = None) -> None:
         import torch  # noqa: PLC0415
@@ -348,12 +380,21 @@ class SmplerXProvider(Provider):
                 f"`hf download caizhongang/SMPLer-X {variant}.pth.tar "
                 f"--local-dir models/smplerx`"
             )
-        if not smplx_npz.is_file():
-            raise FileNotFoundError(
-                f"SMPL-X parametric model missing: {smplx_npz}\n"
-                f"Register at https://smpl-x.is.tue.mpg.de/, download "
-                f"models_smplx_v1_1.zip, extract SMPLX_NEUTRAL.npz to "
-                f"{_MODELS_DIR}/."
+
+        # SMPLX_NEUTRAL.npz is optional. When present, we get mesh +
+        # 3D world joints. When absent, we still get 2D landmarks +
+        # SMPL-X axis-angle params (enough for Blender / Unity SMPL-X
+        # rig drivers). Capability advertisement + runtime_warnings
+        # surface the degraded state to the UI.
+        smplx_path: str | None = (
+            str(_MODELS_DIR) if smplx_npz.is_file() else None
+        )
+        if smplx_path is None:
+            log.warning(
+                "SMPLer-X: SMPLX_NEUTRAL.npz not at %s — running in "
+                "degraded mode (no mesh, no 3D world joints). Drop the "
+                "file to enable them.",
+                smplx_npz,
             )
 
         # PersonDetector is the engine-shared torchvision FasterRCNN
@@ -367,7 +408,7 @@ class SmplerXProvider(Provider):
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         smplerx_cfg = VARIANT_CONFIGS[variant]
         try:
-            model = SmplerXModel(smplerx_cfg, smplx_path=str(_MODELS_DIR))
+            model = SmplerXModel(smplerx_cfg, smplx_path=smplx_path)
             model = model.to(self._device).eval()
             ckpt = torch.load(str(ckpt_path), map_location=self._device, weights_only=False)
             state = {
@@ -384,10 +425,15 @@ class SmplerXProvider(Provider):
                     len(non_smplx_missing), len(unexpected),
                 )
             self._model = model
+            self._has_smplx = model.smplx_layer is not None
 
             # Cache mesh faces (constant SMPL-X topology, 20908 triangles).
-            faces_np = np.asarray(model.smplx_layer.faces, dtype=np.int64)
-            self._faces_list = faces_np.tolist()
+            # Skipped in degraded mode — we won't be emitting mesh.
+            if self._has_smplx:
+                faces_np = np.asarray(model.smplx_layer.faces, dtype=np.int64)
+                self._faces_list = faces_np.tolist()
+            else:
+                self._faces_list = []
 
             # Person detector — torchvision FasterRCNN (BSD-3,
             # AGPL-free). Same detector as ViTPose provider via the
@@ -396,12 +442,14 @@ class SmplerXProvider(Provider):
             self._detector = PersonDetector(model_name=det_model)
             self._detector.setup()
 
+            mode = "full" if self._has_smplx else "degraded (no mesh / 3D joints)"
             log.info(
-                "SmplerX loaded variant=%s device=%s faces=%d",
-                variant, self._device, len(self._faces_list),
+                "SmplerX loaded variant=%s device=%s faces=%d mode=%s",
+                variant, self._device, len(self._faces_list), mode,
             )
         except Exception:  # pylint: disable=broad-except
             log.exception("Failed to initialise SMPLer-X")
+            self._has_smplx = False
             self._model = None
             self._detector = None
             self._faces_list = []
@@ -495,10 +543,12 @@ class SmplerXProvider(Provider):
 
         # ── Map outputs to ProviderOutput ──────────────────────────────
         # smplx out.joints is 144-long; the first 55 entries are the
-        # SMPL-X kinematic tree we registered as SMPLX_55.
-        joints = out["joints"][0, :55]                          # (55, 3) torch
-        verts = out["vertices"][0]                              # (10475, 3) torch
-        cam_t = out["cam_trans"][0]                             # (3,) torch
+        # SMPL-X kinematic tree we registered as SMPLX_55. ``joints``
+        # and ``vertices`` are only present when the SMPL-X parametric
+        # layer loaded — see model.py forward.
+        joints_tensor = out["joints"]                            # (B, 137, 3) or None
+        verts_tensor = out["vertices"]                           # (B, 10475, 3) or None
+        cam_t = out["cam_trans"][0]                              # (3,) torch
 
         # 2D landmark path — back-project the model's heatmap predictions
         # (body_joint_img + hand_joint_img) instead of the SMPL-X mesh
@@ -531,28 +581,32 @@ class SmplerXProvider(Provider):
             x1c, y1c, bw, bh, W, H,
         )
 
-        joints_local = joints.detach().cpu().numpy()           # (55, 3)
-        verts_local = verts.detach().cpu().numpy()             # (10475, 3)
-
         provider_out = ProviderOutput(skeleton_topology=SkeletonTopology.SMPLX_55)
         provider_out.pose_landmarks = pose_landmarks
-        provider_out.pose_world_landmarks = [
-            [float(joints_local[i, 0]),
-             float(joints_local[i, 1]),
-             float(joints_local[i, 2])]
-            for i in range(55)
-        ]
         provider_out.visibility = [1.0] * 55
 
-        # Mesh
-        provider_out.mesh_vertices = [
-            [float(verts_local[i, 0]),
-             float(verts_local[i, 1]),
-             float(verts_local[i, 2])]
-            for i in range(verts_local.shape[0])
-        ]
-        provider_out.mesh_faces = self._faces_list
-        provider_out.mesh_topology = "smplx"
+        # 3D world-space joints + mesh require the SMPL-X parametric
+        # layer. In degraded mode (no SMPLX_NEUTRAL.npz) these are
+        # absent — the regression-head outputs above (pose_landmarks,
+        # SMPL-X params) still flow. Downstream consumers tolerate
+        # empty world_landmarks and empty mesh_vertices.
+        if joints_tensor is not None and verts_tensor is not None:
+            joints_local = joints_tensor[0, :55].detach().cpu().numpy()  # (55, 3)
+            verts_local = verts_tensor[0].detach().cpu().numpy()         # (10475, 3)
+            provider_out.pose_world_landmarks = [
+                [float(joints_local[i, 0]),
+                 float(joints_local[i, 1]),
+                 float(joints_local[i, 2])]
+                for i in range(55)
+            ]
+            provider_out.mesh_vertices = [
+                [float(verts_local[i, 0]),
+                 float(verts_local[i, 1]),
+                 float(verts_local[i, 2])]
+                for i in range(verts_local.shape[0])
+            ]
+            provider_out.mesh_faces = self._faces_list
+            provider_out.mesh_topology = "smplx"
 
         # SMPL-X parameters — concat in the canonical order for the
         # Blender driver: root_pose(3) + body_pose(63) + lhand(45) +
@@ -590,6 +644,7 @@ class SmplerXProvider(Provider):
         self._model = None
         self._detector = None
         self._faces_list = []
+        self._has_smplx = False
         try:
             import torch  # noqa: PLC0415
             torch.cuda.empty_cache()
