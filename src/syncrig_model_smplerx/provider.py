@@ -451,6 +451,13 @@ class SmplerXProvider(Provider):
             fps_estimate=30,    # ViT-S; H32 ~15 fps
             device_kinds=frozenset({"cuda", "cpu"}),
             min_vram_gb=4.0,
+            # SMPLer-X regresses whole-body pose so the SMPL-X axis-angle
+            # output covers every joint, but the 2D back-projection from
+            # PositionNet heatmaps can land outside the camera frame for
+            # body parts that aren't actually visible. Provider derives a
+            # per-joint confidence from that frame-bound check so the
+            # retarget can drop off-screen joints — see process().
+            has_per_joint_confidence=True,
             commercial="non-commercial",
             commercial_note=(
                 "S-Lab License 1.0 (code + weights). The optional "
@@ -595,8 +602,19 @@ class SmplerXProvider(Provider):
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         smplerx_cfg = VARIANT_CONFIGS[variant]
         try:
+            self.emit_setup_progress(
+                pct=None,
+                text=f"building SMPLer-X graph ({variant}, device={self._device})",
+            )
             model = SmplerXModel(smplerx_cfg, smplx_path=smplx_path)
             model = model.to(self._device).eval()
+            # torch.load on the largest variant (smpler_x_h32_correct, ~6 GB)
+            # can block 30–90 s without progress; emit a sticky label so
+            # the UI shows "loading" instead of looking hung.
+            self.emit_setup_progress(
+                pct=None,
+                text=f"loading checkpoint {ckpt_path.name}",
+            )
             ckpt = torch.load(str(ckpt_path), map_location=self._device, weights_only=False)
             state = {
                 k[len("module."):] if k.startswith("module.") else k: v
@@ -625,7 +643,21 @@ class SmplerXProvider(Provider):
             # Person detector — torchvision FasterRCNN (BSD-3,
             # AGPL-free). Same detector as ViTPose provider via the
             # shared `_person_detector.PersonDetector` helper.
+            #
+            # First-run note: torchvision's `weights=DEFAULT` triggers a
+            # ~70 MB torch-hub download into
+            # ``~/.cache/torch/hub/checkpoints/`` with no progress
+            # callback we can hook. Without an emit here the UI shows
+            # "loading…" silently for up to a minute on cold cache,
+            # which reads as a hang. Subsequent runs hit the cache.
             det_model = cfg.get("detector", "mobilenet_v3_320")
+            self.emit_setup_progress(
+                pct=None,
+                text=(
+                    f"loading person detector ({det_model}); "
+                    "first run downloads ~70 MB to torch hub cache"
+                ),
+            )
             self._detector = PersonDetector(model_name=det_model)
             self._detector.setup()
 
@@ -770,7 +802,24 @@ class SmplerXProvider(Provider):
 
         provider_out = ProviderOutput(skeleton_topology=SkeletonTopology.SMPLX_55)
         provider_out.pose_landmarks = pose_landmarks
-        provider_out.visibility = [1.0] * 55
+        # Per-joint confidence — 1.0 when the 2D landmark sits inside the
+        # camera frame (with a small edge tolerance so a foot that
+        # clips the frame border isn't dropped), 0.0 when it doesn't.
+        # SMPLer-X regresses whole-body SMPL-X for every joint regardless
+        # of visibility, so PositionNet hallucinates plausible coords for
+        # body parts outside the view; the retarget's confidence gate
+        # (compute_smpl_pose, conf_threshold=0.5) then ignores them.
+        # Worker mirrors ProviderOutput.visibility into SkeletonFrame's
+        # mandatory ``confidence`` field — see pipeline/worker.py.
+        _MARGIN = 0.05
+        confidence = [
+            1.0
+            if (-_MARGIN <= lm[0] <= 1.0 + _MARGIN
+                and -_MARGIN <= lm[1] <= 1.0 + _MARGIN)
+            else 0.0
+            for lm in pose_landmarks
+        ]
+        provider_out.visibility = confidence
 
         # 3D world-space joints + mesh: full mode uses SMPL-X forward
         # output; degraded mode reconstructs a 55-joint skeleton from

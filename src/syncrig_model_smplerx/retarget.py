@@ -36,12 +36,18 @@ def _handler(payload, rest, rest_perp):
     Same body-IK as ROMP's ``smpl_24`` path because ``compute_smpl_pose``
     handles both — branching on ``payload.smpl.model_type`` to enable
     the extra SMPL-X joints (eyes, jaw, fingers) when present.
+
+    ``skel.confidence`` is forwarded so off-frame / occluded joints
+    (SMPLer-X's PositionNet still emits coordinates for hallucinated
+    body parts) don't drive phantom limb rotations. See
+    ``compute_smpl_pose``'s ``confidence`` docstring.
     """
     skel = payload.skeleton
     if skel is None or not skel.world_landmarks:
         return None
     return compute_smpl_pose(
         skel.world_landmarks, payload.smpl, rest, rest_perp,
+        confidence=list(skel.confidence) if skel.confidence else None,
     )
 
 
