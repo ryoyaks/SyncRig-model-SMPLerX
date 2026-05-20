@@ -567,12 +567,49 @@ class SmplerXProvider(Provider):
         ckpt_path = _MODELS_DIR / f"{variant}.pth.tar"
         smplx_npz = _MODELS_DIR / "SMPLX_NEUTRAL.npz"
 
+        # install_steps only declares s32 by default — the user can pick
+        # the larger h32_correct variant in the provider config and we
+        # don't want them to bounce out to the CLI to grab a missing
+        # checkpoint. Fall back to a one-shot HF download here; the
+        # engine's venv ships huggingface_hub so we can use it directly.
+        # Progress emit keeps the UI from looking hung during the
+        # multi-GB ViT-H download.
         if not ckpt_path.is_file():
-            raise FileNotFoundError(
-                f"SMPLer-X weights missing: {ckpt_path}\n"
-                f"Download from HuggingFace: "
-                f"`hf download caizhongang/SMPLer-X {variant}.pth.tar "
-                f"--local-dir models/smplerx`"
+            self.emit_setup_progress(
+                pct=None,
+                text=(
+                    f"downloading {variant}.pth.tar from HuggingFace "
+                    "(one-time)"
+                ),
+            )
+            try:
+                from huggingface_hub import hf_hub_download  # noqa: PLC0415
+            except ImportError as exc:
+                raise FileNotFoundError(
+                    f"SMPLer-X weights missing: {ckpt_path}\n"
+                    f"huggingface_hub unavailable for auto-download "
+                    f"({exc}). Manual: `hf download caizhongang/SMPLer-X "
+                    f"{variant}.pth.tar --local-dir models/smplerx`"
+                ) from exc
+            _MODELS_DIR.mkdir(parents=True, exist_ok=True)
+            try:
+                hf_hub_download(
+                    repo_id="caizhongang/SMPLer-X",
+                    filename=f"{variant}.pth.tar",
+                    local_dir=str(_MODELS_DIR),
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                raise FileNotFoundError(
+                    f"SMPLer-X weights missing and HF download failed "
+                    f"for {variant}: {exc}"
+                ) from exc
+            if not ckpt_path.is_file():
+                raise FileNotFoundError(
+                    f"HF download completed but {ckpt_path} not found"
+                )
+            self.emit_setup_progress(
+                pct=100.0,
+                text=f"downloaded {variant}.pth.tar",
             )
 
         # SMPLX_NEUTRAL.npz is optional. When present, we get mesh +
